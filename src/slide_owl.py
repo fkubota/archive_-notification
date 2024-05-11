@@ -156,30 +156,21 @@ def parse_iop_rss(driver, rss_url_list: list, keywords: dict, score_threshold: f
 
 
 
-def parse_elsevier_rss(driver, rss_url_list: list, keywords: dict, score_threshold: float, ecs_info: list[str, str]):
+def parse_elsevier_rss(driver, rss_url_list: list, keywords: dict, score_threshold: float):
     results = []
     yesterday = (datetime.date.today() - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
-    p = r'<p>(.*?)</p>'
 
     for i, url in enumerate(rss_url_list):
         d = feedparser.parse(url)
         print(f"{len(d['entries'])} articles are found in RSS feed.")
         for entry in d["entries"]:
             try:
-                driver.get(entry["link"])
-                entry["updated"] = driver.find_element(by=By.XPATH, value='//meta[@name="citation_online_date"]').get_attribute('content')
-                entry["updated_parsed"] = datetime.datetime.strptime(entry["updated"], "%Y/%m/%d").timetuple()
                 if time.strftime("%Y-%m-%d", entry["updated_parsed"]) != yesterday:
                     # print(f"{entry['title']} is updated at {entry['updated']}.")
                     continue
-                abstract = driver.find_element(by=By.XPATH, value='//h2[text()="Abstract"]/following-sibling::div').text.replace("\n", " ")
+                abstract = entry["summary"].removeprefix('<div class="abstract"><p>').removesuffix('</p></div>')
                 entry["summary"] = abstract
-                entry["doi"] = driver.find_element(by=By.XPATH, value='//meta[@name="citation_doi"]').get_attribute('content')
-                ## EJDB適用後のリンクでrssのURLを記載しておき、iopと同様にログインするようにすればPDFリンクも取得できると思うが、結局規約的にPDFダウンロードは避けているため使わない
-                # try:
-                #     entry["pdf_url"] = driver.find_element(by=By.XPATH, value='//*[@class="ViewPDF"]//a[1]').get_attribute('href')
-                # except Exception as e:
-                #     entry["pdf_url"] = ""
+                entry["doi"] = entry["prism_doi"]
                 entry["pdf_url"] = ""
                 score, hit_keywords = calc_score(abstract, keywords)
                 if score < score_threshold:
@@ -187,17 +178,47 @@ def parse_elsevier_rss(driver, rss_url_list: list, keywords: dict, score_thresho
                     continue
                 abstract_trans = get_translated_text("en", "ja", abstract, driver)
                 
-                entry["authors"] = re.findall(p, entry["summary_detail"]["value"])[-1].removeprefix("Author(s): ")
+                entry["authors"] = ", ".join([author["name"] for author in entry["authors"]])
                 entry["link"] = entry["id"]
                 entry["updated"] = d["updated"]
                 entry["updated_parsed"] = d["updated_parsed"]
-                result = Result(score=score, hit_keywords=hit_keywords, source="elsevier", res=entry, abst_jp=abstract_trans)
+                result = Result(score=score, hit_keywords=hit_keywords, source="cambridge", res=entry, abst_jp=abstract_trans)
                 results.append(result)
 
             except Exception as e:
                 print(e)
                 continue
                 
+    return results
+
+
+def parse_cambridge_rss(driver, rss_url_list: list, keywords: dict, score_threshold: float):
+    results = []
+    yesterday = (datetime.date.today() - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
+
+    for i, url in enumerate(rss_url_list):
+        if i==0:
+            ecs_login(driver, url, ecs_info)
+        else:
+            driver.get(url)
+            time.sleep(2)
+
+        d = feedparser.parse(driver.page_source)
+        print(f"{len(d['entries'])} articles are found in RSS feed.")
+        for entry in d["entries"]:
+            if time.strftime("%Y-%m-%d", entry["updated_parsed"]) != yesterday:
+                print(f"{entry['title']} is updated at {entry['updated']}.")
+                continue
+            abstract = entry["summary"].replace("\n", " ")
+            score, hit_keywords = calc_score(abstract, keywords)
+            if score < score_threshold:
+                print(f"Score of {entry['title']} is {score}.")
+                continue
+            entry["authors"] = entry["authors"][0]["name"]
+            abstract_trans = get_translated_text("en", "ja", abstract, driver)
+            result = Result(score=score, hit_keywords=hit_keywords, source="iop", res=entry, abst_jp=abstract_trans)
+            results.append(result)
+
     return results
 
 
@@ -265,6 +286,10 @@ def get_summary(result, client):
             summary_dict["doi"]= res["prism_doi"]
         elif result.source == "elsevier":
             summary_dict["id"] = Path(res["id"]).parts[-1]
+            summary_dict["pdf_url"] = res["pdf_url"]
+            summary_dict["doi"]= res["doi"]
+        elif result.source == "elsevier":
+            summary_dict["id"] = Path(res["doi"]).parts[-1]
             summary_dict["pdf_url"] = res["pdf_url"]
             summary_dict["doi"]= res["doi"]
         else:
@@ -422,7 +447,7 @@ def main():
     results.extend(results_arxiv)
     results_iop = parse_iop_rss(driver, iop_rss_url, keywords, score_threshold, ecs_info=[ecs_id, ecs_pass])
     results.extend(results_iop)
-    results_elsevier = parse_elsevier_rss(driver, elsevier_rss_url, keywords, score_threshold, ecs_info=[ecs_id, ecs_pass])
+    results_elsevier = parse_elsevier_rss(driver, elsevier_rss_url, keywords, score_threshold)
     results.extend(results_elsevier)
 
     driver.quit()
